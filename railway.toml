@@ -4,3 +4,6 @@ builder = "RAILPACK"
 [deploy]
 startCommand = "streamlit run dashboard/app.py --server.port=$PORT --server.address=0.0.0.0 & python3 live_bot.py"
 restartPolicyType = "always"
+
+[deploy.variables]
+RAILPACK_PYTHON_VERSION = "3.11"
