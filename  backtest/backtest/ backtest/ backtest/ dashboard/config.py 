@@ -1,0 +1,12 @@
+import json
+from pathlib import Path
+CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.json'
+def load_config(defaults):
+    if CONFIG_PATH.exists():
+        try:
+            defaults.update(json.loads(CONFIG_PATH.read_text()))
+        except Exception:
+            pass
+    return defaults
+def save_config(cfg):
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2, default=str))

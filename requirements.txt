@@ -1,0 +1,7 @@
+yfinance==0.2.58
+alpaca-py==0.43.4
+pandas==2.2.2
+streamlit==1.35.0
+python-dotenv==1.0.1
+plotly==5.22.0
+requests==2.32.3

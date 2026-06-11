@@ -1,0 +1,129 @@
+import os, time, json, math
+from pathlib import Path
+import pandas as pd
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest, LimitOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+API_KEY = os.getenv('ALPACA_API_KEY')
+API_SECRET = os.getenv('ALPACA_API_SECRET')
+SYMBOL = os.getenv('SYMBOL', 'QQQ')
+TZ = 'Europe/London'
+SESSION_START = '08:00'
+SESSION_END = '17:00'
+OBS_MINUTES = 90
+TIMEFRAME = TimeFrame.Minute
+POLL_SECONDS = 300
+RISK_PER_TRADE = float(os.getenv('RISK_PER_TRADE', '0.01'))
+INITIAL_CAPITAL = float(os.getenv('INITIAL_CAPITAL', '10000'))
+SMA_PERIOD = int(os.getenv('SMA_PERIOD', '200'))
+EMA_PERIOD = int(os.getenv('EMA_PERIOD', '50'))
+EMA_TOL = float(os.getenv('EMA_TOLERANCE', '0.15'))
+RR_TARGET = float(os.getenv('RR_TARGET', '3.0'))
+TRAIL_R = float(os.getenv('TRAIL_R', '2.0'))
+VOLUME_LOOKBACK = int(os.getenv('VOLUME_LOOKBACK', '8'))
+VOLUME_SPIKE = float(os.getenv('VOLUME_SPIKE', '0.40'))
+ALLOWED_LONG = set(json.loads(os.getenv('ALLOWED_LONG', '["hammer","bullish_engulfing","bullish_pinbar","tweezer_bottom"]')))
+ALLOWED_SHORT = set(json.loads(os.getenv('ALLOWED_SHORT', '["shooting_star","bearish_engulfing","bearish_pinbar","tweezer_top"]')))
+STATE_PATH = Path(os.getenv('STATE_PATH', './bot_state.json'))
+def london_now(): return pd.Timestamp.now(tz=TZ)
+def in_session(ts): hm = ts.strftime('%H:%M'); return SESSION_START <= hm < SESSION_END
+def load_state():
+    if STATE_PATH.exists():
+        try: return json.loads(STATE_PATH.read_text())
+        except Exception: pass
+    return {'last_signal_bar': None, 'active_trade': None}
+def save_state(state): STATE_PATH.write_text(json.dumps(state, default=str, indent=2))
+def load_data(client, start, end):
+    req = StockBarsRequest(symbol_or_symbols=SYMBOL, timeframe=TIMEFRAME, start=start, end=end)
+    bars = client.get_stock_bars(req).df
+    if bars.empty: return bars
+    if isinstance(bars.index, pd.MultiIndex): bars = bars.xs(SYMBOL)
+    if bars.index.tz is None: bars.index = bars.index.tz_localize('UTC')
+    return bars.rename(columns=str.lower)[['open', 'high', 'low', 'close', 'volume']]
+def sma(x, n): return x.rolling(n).mean()
+def ema(x, n): return x.ewm(span=n, adjust=False).mean()
+def session_vwap(df):
+    local = df.index.tz_convert(TZ); anchors = []
+    for ts in local:
+        a = ts.normalize() + pd.Timedelta(hours=8)
+        if ts < a: a -= pd.Timedelta(days=1)
+        anchors.append(a)
+    tmp = df.copy(); tmp['_a'] = anchors; tp = (tmp.high + tmp.low + tmp.close) / 3.0; pv = tp * tmp.volume; out = pd.Series(index=df.index, dtype=float)
+    for _, g in tmp.groupby('_a', sort=False): out.loc[g.index] = pv.loc[g.index].cumsum() / g.volume.cumsum()
+    return out
+def body(r): return abs(r.close - r.open)
+def uw(r): return r.high - max(r.open, r.close)
+def lw(r): return min(r.open, r.close) - r.low
+def bullish_engulfing(p, c): return p.close < p.open and c.close > c.open and c.close >= p.open and c.open <= p.close
+def bearish_engulfing(p, c): return p.close > p.open and c.close < c.open and c.open >= p.close and c.close <= p.open
+def hammer(r): b = max(body(r), 1e-9); return lw(r) >= 2*b and uw(r) <= 0.35*b and r.close > r.open
+def shooting_star(r): b = max(body(r), 1e-9); return uw(r) >= 2*b and lw(r) <= 0.35*b and r.close < r.open
+def bullish_pinbar(r): b = max(body(r), 1e-9); return lw(r) >= 2*b and uw(r) <= 0.4*b and r.close > r.open
+def bearish_pinbar(r): b = max(body(r), 1e-9); return uw(r) >= 2*b and lw(r) <= 0.4*b and r.close < r.open
+def tweezer_bottom(p, c): return abs(p.low - c.low) / max(p.low, 1e-9) < 0.0005 and p.close < p.open and c.close > c.open
+def tweezer_top(p, c): return abs(p.high - c.high) / max(p.high, 1e-9) < 0.0005 and p.close > p.open and c.close < c.open
+def detect_pattern(prev, curr):
+    for side, name, ok in [('long', 'bullish_engulfing', bullish_engulfing(prev, curr)), ('short', 'bearish_engulfing', bearish_engulfing(prev, curr)), ('long', 'hammer', hammer(curr)), ('short', 'shooting_star', shooting_star(curr)), ('long', 'bullish_pinbar', bullish_pinbar(curr)), ('short', 'bearish_pinbar', bearish_pinbar(curr)), ('long', 'tweezer_bottom', tweezer_bottom(prev, curr)), ('short', 'tweezer_top', tweezer_top(prev, curr))]:
+        if ok: return side, name
+    return None
+def has_open_position(trade_client): return any(p.symbol == SYMBOL for p in trade_client.get_all_positions())
+def cancel_existing_orders(trade_client):
+    orders = trade_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[SYMBOL]))
+    for o in orders:
+        try: trade_client.cancel_order_by_id(o.id)
+        except Exception: pass
+def place_bracket(trade_client, side, qty, stop, target):
+    if side == 'long':
+        trade_client.submit_order(MarketOrderRequest(symbol=SYMBOL, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.DAY))
+        trade_client.submit_order(StopOrderRequest(symbol=SYMBOL, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC, stop_price=round(stop, 2)))
+        trade_client.submit_order(LimitOrderRequest(symbol=SYMBOL, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC, limit_price=round(target, 2)))
+    else:
+        trade_client.submit_order(MarketOrderRequest(symbol=SYMBOL, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY))
+        trade_client.submit_order(StopOrderRequest(symbol=SYMBOL, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC, stop_price=round(stop, 2)))
+        trade_client.submit_order(LimitOrderRequest(symbol=SYMBOL, qty=qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC, limit_price=round(target, 2)))
+def main():
+    trade_client = TradingClient(API_KEY, API_SECRET, paper=True); data_client = StockHistoricalDataClient(API_KEY, API_SECRET); state = load_state()
+    while True:
+        now = london_now()
+        if not in_session(now):
+            if state.get('active_trade'):
+                cancel_existing_orders(trade_client); state['active_trade'] = None; save_state(state)
+            time.sleep(POLL_SECONDS); continue
+        end = now.tz_convert('UTC'); start = end - pd.Timedelta(days=10)
+        df = load_data(data_client, start, end)
+        if df.empty or len(df) < max(SMA_PERIOD, EMA_PERIOD, VOLUME_LOOKBACK) + 5:
+            time.sleep(POLL_SECONDS); continue
+        df['sma'] = sma(df.close, SMA_PERIOD); df['ema'] = ema(df.close, EMA_PERIOD); df['vwap'] = session_vwap(df)
+        local = df.index.tz_convert(TZ); anchors = []
+        for ts in local:
+            a = ts.normalize() + pd.Timedelta(hours=8)
+            if ts < a: a -= pd.Timedelta(days=1)
+            anchors.append(a)
+        df['anchor'] = anchors; df['session_open'] = df.groupby('anchor')['open'].transform('first'); df['minutes_from_start'] = (pd.Series(local, index=df.index) - pd.to_datetime(df['anchor'])).dt.total_seconds() / 60.0
+        if len(df) < 3: time.sleep(POLL_SECONDS); continue
+        prev = df.iloc[-2]; last = df.iloc[-1]; bar_id = str(last.name)
+        if state.get('last_signal_bar') == bar_id: time.sleep(POLL_SECONDS); continue
+        state['last_signal_bar'] = bar_id
+        if last.minutes_from_start < OBS_MINUTES or has_open_position(trade_client): save_state(state); time.sleep(POLL_SECONDS); continue
+        sig = detect_pattern(prev, last)
+        if sig is None: save_state(state); time.sleep(POLL_SECONDS); continue
+        side, pattern = sig; ema_ok = abs(last.close - last.ema) / max(last.ema, 1e-9) <= EMA_TOL
+        if side == 'long':
+            enabled = pattern in ALLOWED_LONG; trend_ok = last.close > last.vwap and last.close > last.sma and last.close > last.session_open and ema_ok and last.close > prev.high
+        else:
+            enabled = pattern in ALLOWED_SHORT; trend_ok = last.close < last.vwap and last.close < last.sma and last.close < last.session_open and ema_ok and last.close < prev.low
+        if not (enabled and trend_ok): save_state(state); time.sleep(POLL_SECONDS); continue
+        lb = df['volume'].iloc[-(VOLUME_LOOKBACK + 1):-1]
+        if len(lb) < VOLUME_LOOKBACK or last.volume < lb.mean() * (1 + VOLUME_SPIKE): save_state(state); time.sleep(POLL_SECONDS); continue
+        entry = float(last.close); risk_cash = INITIAL_CAPITAL * RISK_PER_TRADE
+        if side == 'long': stop = float(last.low); dist = entry - stop; target = entry + RR_TARGET * dist
+        else: stop = float(last.high); dist = stop - entry; target = entry - RR_TARGET * dist
+        if dist <= 0: save_state(state); time.sleep(POLL_SECONDS); continue
+        qty = max(math.floor(risk_cash / dist), 1)
+        cancel_existing_orders(trade_client); place_bracket(trade_client, side, qty, stop, target)
+        state['active_trade'] = {'side': side, 'pattern': pattern, 'qty': qty, 'entry': entry, 'stop': stop, 'target': target, 'time': str(last.name)}; save_state(state); time.sleep(POLL_SECONDS)
+if __name__ == '__main__': main()
+

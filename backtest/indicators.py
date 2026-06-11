@@ -1,0 +1,192 @@
+import pandas as pd
+from dataclasses import dataclass
+from typing import Tuple
+
+def get_price_source(df, source="close"):
+    source = source.lower()
+    if source == "close": return df["close"]
+    if source == "hl2": return (df["high"] + df["low"]) / 2
+    if source == "hlc3": return (df["high"] + df["low"] + df["close"]) / 3
+    if source == "ohlc4": return (df["open"] + df["high"] + df["low"] + df["close"]) / 4
+    raise ValueError(source)
+
+def sma(s, n): return s.rolling(n).mean()
+def ema(s, n): return s.ewm(span=n, adjust=False).mean()
+
+def session_vwap(df, session_start_hour=8, session_start_minute=0, tz="Europe/London"):
+    local = df.index.tz_convert(tz)
+    anchors = []
+    for ts in local:
+        a = ts.normalize() + pd.Timedelta(hours=session_start_hour, minutes=session_start_minute)
+        if ts < a:
+            a -= pd.Timedelta(days=1)
+        anchors.append(a)
+    tmp = df.copy()
+    tmp["_anchor"] = anchors
+    tp = (tmp["high"] + tmp["low"] + tmp["close"]) / 3.0
+    pv = tp * tmp["volume"]
+    out = pd.Series(index=df.index, dtype=float)
+    for _, g in tmp.groupby("_anchor", sort=False):
+        out.loc[g.index] = pv.loc[g.index].cumsum() / g["volume"].cumsum()
+    return out
+
+def body(r): return abs(r["close"] - r["open"])
+def uw(r): return r["high"] - max(r["open"], r["close"])
+def lw(r): return min(r["open"], r["close"]) - r["low"]
+def bullish_engulfing(p, c): return p["close"] < p["open"] and c["close"] > c["open"] and c["close"] >= p["open"] and c["open"] <= p["close"]
+def bearish_engulfing(p, c): return p["close"] > p["open"] and c["close"] < c["open"] and c["open"] >= p["close"] and c["close"] <= p["open"]
+def hammer(r): b = max(body(r), 1e-9); return lw(r) >= 2*b and uw(r) <= 0.35*b and r["close"] > r["open"]
+def shooting_star(r): b = max(body(r), 1e-9); return uw(r) >= 2*b and lw(r) <= 0.35*b and r["close"] < r["open"]
+def bullish_pinbar(r): b = max(body(r), 1e-9); return lw(r) >= 2*b and uw(r) <= 0.4*b and r["close"] > r["open"]
+def bearish_pinbar(r): b = max(body(r), 1e-9); return uw(r) >= 2*b and lw(r) <= 0.4*b and r["close"] < r["open"]
+def tweezer_bottom(p, c): return abs(p["low"] - c["low"])/max(p["low"], 1e-9) < 0.0005 and p["close"] < p["open"] and c["close"] > c["open"]
+def tweezer_top(p, c): return abs(p["high"] - c["high"])/max(p["high"], 1e-9) < 0.0005 and p["close"] > p["open"] and c["close"] < c["open"]
+
+@dataclass
+class BacktestConfig:
+    session_tz: str = "Europe/London"
+    session_start_hour: int = 8
+    session_end_hour: int = 17
+    observation_minutes: int = 60
+    sma_period: int = 200
+    ema_period: int = 50
+    ema_tolerance_pct: float = 0.50
+    rr_target: float = 3.0
+    trailing_trigger_rr: float = 2.0
+    risk_per_trade: float = 0.01
+    initial_capital: float = 10000.0
+    volume_lookback: int = 8
+    volume_spike_pct: float = 0.10
+    price_source: str = "close"
+    allowed_patterns_long: Tuple[str, ...] = ("bullish_engulfing", "tweezer_bottom")
+    allowed_patterns_short: Tuple[str, ...] = ("bearish_engulfing", "tweezer_top")
+    confirm_next_close: bool = False
+    daily_drawdown_limit: float = 200.0  # stop trading day if loss exceeds this
+    close_positions_at_session_end: bool = True
+
+class StrategyBacktester:
+    def __init__(self, df, config):
+        self.df = df.copy().sort_index()
+        self.config = config
+        self.trades = []
+        self.equity_curve = []
+    def prepare(self):
+        df = self.df
+        price = get_price_source(df, self.config.price_source)
+        df["sma"] = sma(price, self.config.sma_period)
+        df["ema"] = ema(price, self.config.ema_period)
+        df["vwap"] = session_vwap(df, self.config.session_start_hour, 0, self.config.session_tz)
+        local = df.index.tz_convert(self.config.session_tz)
+        anchors = []
+        for ts in local:
+            a = ts.normalize() + pd.Timedelta(hours=self.config.session_start_hour)
+            if ts < a:
+                a -= pd.Timedelta(days=1)
+            anchors.append(a)
+        df["session_anchor"] = anchors
+        df["session_open"] = df.groupby("session_anchor")["open"].transform("first")
+        df["minutes_from_start"] = (pd.Series(local, index=df.index) - pd.to_datetime(df["session_anchor"])).dt.total_seconds() / 60.0
+        df["within_session"] = (local.hour * 60 + local.minute) >= (self.config.session_start_hour * 60)
+        df["within_end"] = (local.hour * 60 + local.minute) < (self.config.session_end_hour * 60)
+        self.df = df
+    def detect_pattern(self, i):
+        df = self.df
+        prev = df.iloc[i - 1]
+        curr = df.iloc[i]
+        checks = [
+            ("long", "bullish_engulfing", bullish_engulfing(prev, curr)),
+            ("short", "bearish_engulfing", bearish_engulfing(prev, curr)),
+            ("long", "hammer", hammer(curr)),
+            ("short", "shooting_star", shooting_star(curr)),
+            ("long", "bullish_pinbar", bullish_pinbar(curr)),
+            ("short", "bearish_pinbar", bearish_pinbar(curr)),
+            ("long", "tweezer_bottom", tweezer_bottom(prev, curr)),
+            ("short", "tweezer_top", tweezer_top(prev, curr)),
+        ]
+        for side, name, ok in checks:
+            if ok:
+                if side == "long" and name in self.config.allowed_patterns_long:
+                    return side, name
+                if side == "short" and name in self.config.allowed_patterns_short:
+                    return side, name
+        return None
+    def _volume_ok(self, i):
+        if i < self.config.volume_lookback:
+            return False
+        avg_prev = self.df["volume"].iloc[i - self.config.volume_lookback:i].mean()
+        return self.df["volume"].iloc[i] >= avg_prev * (1 + self.config.volume_spike_pct)
+    def _trend_long(self, row):
+        ema_ok = abs(row["close"] - row["ema"]) / max(row["ema"], 1e-9) <= self.config.ema_tolerance_pct
+        return row["close"] > row["vwap"] and row["close"] > row["sma"] and row["close"] > row["session_open"] and ema_ok
+    def _trend_short(self, row):
+        ema_ok = abs(row["close"] - row["ema"]) / max(row["ema"], 1e-9) <= self.config.ema_tolerance_pct
+        return row["close"] < row["vwap"] and row["close"] < row["sma"] and row["close"] < row["session_open"] and ema_ok
+    def run(self):
+        daily_pnl: dict = {}  # date -> cumulative pnl that day
+        self.prepare()
+        df = self.df
+        equity = self.config.initial_capital
+        position = None
+        for i in range(max(self.config.sma_period, self.config.ema_period, self.config.volume_lookback) + 2, len(df)):
+            row = df.iloc[i]
+            bar_date = row.name.date()
+            if daily_pnl.get(bar_date, 0) <= -self.config.daily_drawdown_limit:
+                self.equity_curve.append((row.name, equity))
+                continue
+            self.equity_curve.append((row.name, equity))
+            if position is not None:
+                if position["side"] == "long":
+                    if row["low"] <= position["stop"]:
+                        pnl = (position["stop"] - position["entry"]) * position["qty"]
+                        equity += pnl
+                        self.trades[-1].update({"exit_time": row.name, "exit_price": position["stop"], "pnl": pnl, "result": "SL"})
+                        position = None; continue
+                    if row["high"] >= position["target"]:
+                        pnl = (position["target"] - position["entry"]) * position["qty"]
+                        equity += pnl
+                        self.trades[-1].update({"exit_time": row.name, "exit_price": position["target"], "pnl": pnl, "result": "TP"})
+                        position = None; continue
+                    if not position["be"] and row["high"] >= position["be_trigger"]:
+                        position["stop"] = position["entry"]; position["be"] = True
+                else:
+                    if row["high"] >= position["stop"]:
+                        pnl = (position["entry"] - position["stop"]) * position["qty"]
+                        equity += pnl
+                        self.trades[-1].update({"exit_time": row.name, "exit_price": position["stop"], "pnl": pnl, "result": "SL"})
+                        position = None; continue
+                    if row["low"] <= position["target"]:
+                        pnl = (position["entry"] - position["target"]) * position["qty"]
+                        equity += pnl
+                        self.trades[-1].update({"exit_time": row.name, "exit_price": position["target"], "pnl": pnl, "result": "TP"})
+                        position = None; continue
+                    if not position["be"] and row["low"] <= position["be_trigger"]:
+                        position["stop"] = position["entry"]; position["be"] = True
+            if position is not None:
+                continue
+            if not row["within_session"] or not row["within_end"] or row["minutes_from_start"] < self.config.observation_minutes:
+                continue
+            sig = self.detect_pattern(i - 1)
+            if sig is None or not self._volume_ok(i - 1):
+                continue
+            side, pattern = sig
+            pattern_candle = df.iloc[i - 1]
+            if side == "long":
+                if not self._trend_long(row): continue
+                if self.config.confirm_next_close and not (row["close"] > pattern_candle["high"]): continue
+                entry = row["open"]; stop = pattern_candle["low"]
+                if stop >= entry: continue
+                dist = entry - stop
+                qty = (equity * self.config.risk_per_trade) / dist
+                target = entry + self.config.rr_target * dist
+                position = {"side": "long", "entry": entry, "stop": stop, "target": target, "qty": qty, "be_trigger": entry + self.config.trailing_trigger_rr * dist, "be": False}
+            else:
+                if not self._trend_short(row): continue
+                if self.config.confirm_next_close and not (row["close"] < pattern_candle["low"]): continue
+                entry = row["open"]; stop = pattern_candle["high"]
+                if stop <= entry: continue
+                dist = stop - entry
+                qty = (equity * self.config.risk_per_trade) / dist
+                target = entry - self.config.rr_target * dist
+                position = {"side": "short", "entry": entry, "stop": stop, "target": target, "qty": qty, "be_trigger": entry - self.config.trailing_trigger_rr * dist, "be": False}
+            self.trades.append({"entry_time": row.name, "side": side, "entry_price": entry, "stop_price": stop, "target_price": target, "qty": qty, "pattern": pattern, "result": None, "exit_time": None, "exit_price": None, "pnl": None, "equity_at_entry": equity})
+        return pd.DataFrame(self.trades), pd.DataFrame(self.equity_curve, columns=["time", "equity"])

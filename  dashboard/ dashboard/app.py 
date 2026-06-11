@@ -1,0 +1,46 @@
+import streamlit as st
+from backtest.data_loader import load_qqq
+from backtest.indicators import BacktestConfig, StrategyBacktester
+from dashboard.config import load_config, save_config
+from dashboard.analysis import trade_summary, equity_chart, overall_stats
+st.set_page_config(page_title='QQQ London Strategy Backtest', layout='wide')
+st.title('QQQ London Session Strategy Backtest')
+base = {'start_date': '2024-01-01', 'end_date': '2024-03-01', 'interval': '5m', 'price_source': 'close', 'sma_period': 200, 'ema_period': 50, 'ema_tolerance_pct': 0.15, 'rr_target': 3.0, 'trailing_trigger_rr': 2.0, 'risk_per_trade': 0.01, 'initial_capital': 10000.0, 'observation_minutes': 90, 'volume_lookback': 8, 'volume_spike_pct': 0.40, 'session_start_hour': 8, 'session_end_hour': 17, 'session_tz': 'Europe/London', 'allowed_patterns_long': ['hammer', 'bullish_engulfing', 'bullish_pinbar', 'tweezer_bottom'], 'allowed_patterns_short': ['shooting_star', 'bearish_engulfing', 'bearish_pinbar', 'tweezer_top']}
+base = load_config(base)
+with st.sidebar:
+    start_date = st.text_input('Start date', base['start_date'])
+    end_date = st.text_input('End date', base['end_date'])
+    interval = st.selectbox('Timeframe', ['5m', '15m', '30m', '1h'], index=['5m', '15m', '30m', '1h'].index(base['interval']))
+    price_source = st.selectbox('Price source', ['close', 'hl2', 'hlc3', 'ohlc4'], index=['close', 'hl2', 'hlc3', 'ohlc4'].index(base['price_source']))
+    sma_period = st.number_input('SMA period', value=int(base['sma_period']))
+    ema_period = st.number_input('EMA period', value=int(base['ema_period']))
+    ema_tolerance_pct = st.slider('EMA tolerance %', 0.01, 0.50, float(base['ema_tolerance_pct']))
+    rr_target = st.slider('RR target', 1.0, 5.0, float(base['rr_target']))
+    trailing_trigger_rr = st.slider('Trailing trigger RR', 1.0, 4.0, float(base['trailing_trigger_rr']))
+    risk_per_trade = st.slider('Risk per trade', 0.001, 0.05, float(base['risk_per_trade']))
+    initial_capital = st.number_input('Initial capital', value=float(base['initial_capital']))
+    observation_minutes = st.number_input('Observation minutes', value=int(base['observation_minutes']))
+    volume_lookback = st.number_input('Volume lookback', value=int(base['volume_lookback']))
+    volume_spike_pct = st.slider('Volume spike %', 0.0, 1.0, float(base['volume_spike_pct']))
+    session_start_hour = st.number_input('Session start hour', value=int(base['session_start_hour']))
+    session_end_hour = st.number_input('Session end hour', value=int(base['session_end_hour']))
+    enable_long = st.multiselect('Long patterns', ['hammer', 'bullish_engulfing', 'bullish_pinbar', 'tweezer_bottom'], default=base['allowed_patterns_long'])
+    enable_short = st.multiselect('Short patterns', ['shooting_star', 'bearish_engulfing', 'bearish_pinbar', 'tweezer_top'], default=base['allowed_patterns_short'])
+    run_btn = st.button('Run backtest')
+    save_btn = st.button('Save settings')
+cfg = {'start_date': start_date, 'end_date': end_date, 'interval': interval, 'price_source': price_source, 'sma_period': sma_period, 'ema_period': ema_period, 'ema_tolerance_pct': ema_tolerance_pct, 'rr_target': rr_target, 'trailing_trigger_rr': trailing_trigger_rr, 'risk_per_trade': risk_per_trade, 'initial_capital': initial_capital, 'observation_minutes': observation_minutes, 'volume_lookback': volume_lookback, 'volume_spike_pct': volume_spike_pct, 'session_start_hour': session_start_hour, 'session_end_hour': session_end_hour, 'session_tz': 'Europe/London', 'allowed_patterns_long': enable_long, 'allowed_patterns_short': enable_short}
+if save_btn:
+    save_config(cfg)
+    st.success('Settings saved to config.json')
+if run_btn:
+    df = load_qqq(start_date, end_date, interval)
+    bt_cfg = BacktestConfig(session_tz='Europe/London', session_start_hour=session_start_hour, session_end_hour=session_end_hour, observation_minutes=observation_minutes, sma_period=sma_period, ema_period=ema_period, ema_tolerance_pct=ema_tolerance_pct, rr_target=rr_target, trailing_trigger_rr=trailing_trigger_rr, risk_per_trade=risk_per_trade, initial_capital=initial_capital, volume_lookback=volume_lookback, volume_spike_pct=volume_spike_pct, price_source=price_source, allowed_patterns_long=tuple(enable_long), allowed_patterns_short=tuple(enable_short))
+    bt = StrategyBacktester(df, bt_cfg)
+    trades, equity = bt.run()
+    st.dataframe(overall_stats(trades), use_container_width=True)
+    st.plotly_chart(equity_chart(equity), use_container_width=True)
+    st.subheader('Trade log')
+    st.dataframe(trades, use_container_width=True)
+    st.subheader('Pattern analysis')
+    st.dataframe(trade_summary(trades), use_container_width=True)
+

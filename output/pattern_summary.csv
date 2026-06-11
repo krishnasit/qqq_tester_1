@@ -1,0 +1,5 @@
+pattern,side,trades,total_pnl,avg_pnl,wins,losses,tp,sl,win_rate
+tweezer_bottom,long,10,1124.8304426923166,112.48304426923167,7,3,7,3,0.7
+bullish_engulfing,long,10,852.8993461700533,85.28993461700533,6,4,6,4,0.6
+tweezer_top,short,1,200.0,200.0,1,0,1,0,1.0
+bearish_engulfing,short,1,-109.271426924944,-109.271426924944,0,1,0,1,0.0

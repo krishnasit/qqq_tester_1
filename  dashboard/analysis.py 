@@ -1,0 +1,22 @@
+import pandas as pd
+import plotly.express as px
+
+def trade_summary(trades):
+    if trades.empty:
+        return pd.DataFrame()
+    t = trades.copy()
+    t['result'] = t['result'].fillna('OPEN')
+    summary = t.groupby(['pattern', 'side']).agg(trades=('pattern', 'count'), total_pnl=('pnl', 'sum'), avg_pnl=('pnl', 'mean'), wins=('pnl', lambda s: (s > 0).sum()), losses=('pnl', lambda s: (s < 0).sum()), tp=('result', lambda s: (s == 'TP').sum()), sl=('result', lambda s: (s == 'SL').sum()), be=('result', lambda s: (s == 'BE').sum()), eod=('result', lambda s: (s == 'EOD').sum())).reset_index()
+    summary['win_rate'] = summary['wins'] / summary['trades']
+    return summary.sort_values(['total_pnl', 'trades'], ascending=[False, False])
+
+def overall_stats(trades):
+    if trades.empty:
+        return pd.DataFrame()
+    t = trades.copy()
+    closed = t[t['result'].notna()]
+    return pd.DataFrame([{'trades': len(t), 'closed_trades': len(closed), 'win_rate': (closed['pnl'] > 0).mean() if len(closed) else 0, 'net_pnl': closed['pnl'].sum() if len(closed) else 0, 'avg_pnl': closed['pnl'].mean() if len(closed) else 0, 'tp_count': (closed['result'] == 'TP').sum(), 'sl_count': (closed['result'] == 'SL').sum(), 'be_count': (closed['result'] == 'BE').sum()}])
+
+def equity_chart(equity):
+    return px.line(equity, x='time', y='equity', title='Equity Curve')
+
