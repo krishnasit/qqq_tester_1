@@ -1,6 +1,6 @@
 [build]
-builder = "RAILPACK"
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python3 live_bot.py"
 restartPolicyType = "always"
