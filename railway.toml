@@ -1,6 +1,5 @@
 [build]
-builder = "DOCKERFILE"
-dockerfilePath = "Dockerfile"
+builder = "nixpacks"
 
-[deploy]
-restartPolicyType = "always"
+[build.env]
+NIXPACKS_PYTHON_VERSION = "3.11"
