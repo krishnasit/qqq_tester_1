@@ -1,0 +1,39 @@
+name: QQQ Live Bot
+
+on:
+  schedule:
+    - cron: '*/5 13-20 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install -q yfinance pandas numpy
+
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: |
+            trades_log.csv
+            capital.txt
+          key: qqq-state-${{ github.run_id }}
+          restore-keys: qqq-state-
+
+      - name: Run scan
+        run: python3 live_demo.py --once
+
+      - name: Save state
+        uses: actions/cache@v4
+        with:
+          path: |
+            trades_log.csv
+            capital.txt
+          key: qqq-state-${{ github.run_id }}
