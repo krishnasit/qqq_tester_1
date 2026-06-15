@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          clean: true
 
       - uses: actions/setup-python@v5
         with:
@@ -26,6 +29,9 @@ jobs:
             capital.txt
           key: qqq-state-${{ github.run_id }}
           restore-keys: qqq-state-
+
+      - name: Verify file
+        run: python3 -m py_compile live_demo.py && echo "Syntax OK"
 
       - name: Run scan
         run: python3 live_demo.py --once
