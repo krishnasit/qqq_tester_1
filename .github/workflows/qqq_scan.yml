@@ -31,10 +31,10 @@ jobs:
           restore-keys: qqq-state-
 
       - name: Verify file
-        run: python3 -m py_compile live_demo.py && echo "Syntax OK"
+        run: python3 -m py_compile bot.py && echo "Syntax OK"
 
       - name: Run scan
-        run: python3 live_demo.py --once
+        run: python3 bot.py --once
 
       - name: Save state
         uses: actions/cache@v4
