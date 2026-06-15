@@ -1,12 +1,3 @@
-"""
-QQQ Live Demo Bot — Cloud Ready (Railway / GitHub Actions / local)
-- yFinance only, no broker needed
-- RR 1:1.5 | No trailing stop
-- Logs trades to trades_log.csv
-- python3 live_demo.py          -> continuous loop
-- python3 live_demo.py --once   -> single scan + exit (GitHub Actions)
-"""
-
 import yfinance as yf
 import pandas as pd
 import os, csv, sys, time
@@ -95,7 +86,7 @@ def print_stats():
 def run_scan(active, capital):
     df = fetch_bars()
     if df is None or len(df) < 3:
-        log("Not enough bars — skipping.")
+        log("Not enough bars - skipping.")
         return active, capital
 
     prev    = df.iloc[-3]
@@ -168,7 +159,7 @@ def run_scan(active, capital):
     return active, capital
 
 def run_continuous():
-    log(f"QQQ Bot started — RR 1:{RR} | window {SIGNAL_UTC_START}-{SIGNAL_UTC_END} UTC")
+    log(f"QQQ Bot started - RR 1:{RR} | window {SIGNAL_UTC_START}-{SIGNAL_UTC_END} UTC")
     capital = load_capital()
     active  = None
 
@@ -177,14 +168,16 @@ def run_continuous():
         open_rows = trades[trades["result"] == "OPEN"]
         if not open_rows.empty:
             r = open_rows.iloc[-1]
-            active = {k: r[k] for k in
-                      ["symbol","entry","sl","tp","shares","risk_usd","opened_at"]}
-            active["entry"]    = float(active["entry"])
-            active["sl"]       = float(active["sl"])
-            active["tp"]       = float(active["tp"])
-            active["shares"]   = int(active["shares"])
-            active["risk_usd"] = float(active["risk_usd"])
-            log(f"Restored open trade — Entry: ${active['entry']:.2f}")
+            active = {
+                "symbol":    str(r["symbol"]),
+                "entry":     float(r["entry"]),
+                "sl":        float(r["sl"]),
+                "tp":        float(r["tp"]),
+                "shares":    int(r["shares"]),
+                "risk_usd":  float(r["risk_usd"]),
+                "opened_at": str(r["opened_at"]),
+            }
+            log(f"Restored open trade - Entry: ${active['entry']:.2f}")
 
     log(f"Capital: ${capital:,.2f}")
 
@@ -193,19 +186,19 @@ def run_continuous():
             if is_market_day():
                 active, capital = run_scan(active, capital)
             else:
-                log("Weekend — skipping.")
+                log("Weekend - skipping.")
         except KeyboardInterrupt:
             log("Bot stopped.")
             print_stats()
             break
         except Exception as e:
-            log(f"Error: {e} — retrying in {POLL_SECONDS}s")
+            log(f"Error: {e} - retrying in {POLL_SECONDS}s")
         time.sleep(POLL_SECONDS)
 
 def run_once():
-    log("QQQ Bot — single scan (--once)")
+    log("QQQ Bot - single scan (--once)")
     if not is_market_day():
-        log("Weekend — no scan.")
+        log("Weekend - no scan.")
         return
     capital = load_capital()
     trades  = load_trades()
@@ -214,13 +207,15 @@ def run_once():
         open_rows = trades[trades["result"] == "OPEN"]
         if not open_rows.empty:
             r = open_rows.iloc[-1]
-            active = {k: r[k] for k in
-                      ["symbol","entry","sl","tp","shares","risk_usd","opened_at"]}
-            active["entry"]    = float(active["entry"])
-            active["sl"]       = float(active["sl"])
-            active["tp"]       = float(active["tp"])
-            active["shares"]   = int(active["shares"])
-            active["risk_usd"] = float(active["risk_usd"])
+            active = {
+                "symbol":    str(r["symbol"]),
+                "entry":     float(r["entry"]),
+                "sl":        float(r["sl"]),
+                "tp":        float(r["tp"]),
+                "shares":    int(r["shares"]),
+                "risk_usd":  float(r["risk_usd"]),
+                "opened_at": str(r["opened_at"]),
+            }
     active, capital = run_scan(active, capital)
     print_stats()
 
